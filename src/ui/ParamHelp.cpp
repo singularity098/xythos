@@ -2387,8 +2387,12 @@ constexpr GlobalHelp kGlobalHelp[] = {
       "The pitch of A4 that the tuner tunes to. 440 Hz is standard; change it only to play along with something "
       "tuned differently." },
     { "tuner_strobe",
-      "Switches between the needle view and the strobe view. The strobe bands drift left when you're flat and "
-      "right when you're sharp, and stand still when you're in tune; it's the most precise view." },
+      "Switches to the needle or the strobe view. The needle swings left when you're flat and right when you're "
+      "sharp. The strobe bands drift left when you're flat and right when you're sharp, and stand still when you're "
+      "in tune; it's the most precise view." },
+    { "tuner_runes",
+      "The runes view: a row of 21 glyphs, 5 cents each. Glyphs light up from the centre toward the side you're "
+      "off, left when you're flat and right when you're sharp; tune until only the centre one is lit, in green." },
     { "metro", "Starts and stops the metronome. With DAW sync on, it clicks while the DAW plays." },
     { "metro_tempo",
       "The metronome's speed in beats per minute. Drag the slider, use the -/+ buttons, the arrow keys, or tap "

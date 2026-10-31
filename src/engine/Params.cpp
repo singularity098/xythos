@@ -100,6 +100,13 @@ constexpr GlobalParamSpec kToolParams[kParamSlotLatchBase - kParamMergeBalance] 
     { "Merge Align",         "merge_align",    "ms",  -5.0f,  5.0f,   0.0f,   kParamFlagNone },
 };
 
+// Added after the latches, in index order
+const GlobalParamSpec kNewestParams[] = {
+    // the tuner's Runes view (owner, 2026-10-31: the default; Needle and Strobe stay, on Tuner Strobe)
+    { "Tuner Runes",         "tuner_runes",    "",    0.0f,   1.0f,   1.0f,   kParamFlagToggle | kParamFlagHidden },
+};
+static_assert(sizeof(kNewestParams) / sizeof(kNewestParams[0]) == kParamCount - kParamSlotLatchEnd);
+
 // The per-slot outputs: the meters, and the latched footswitches
 struct SlotOutputSpecs {
     char names[kMaxBlocks][24];
@@ -126,6 +133,8 @@ const GlobalParamSpec& globalParamSpec(uint32_t index)
         static const SlotOutputSpecs meters("Meter", "meter", -60.0f, 60.0f, kParamFlagOutput | kParamFlagHidden);
         if (index < kParamSlotMeterEnd)
             return meters.specs[index - kParamSlotMeterBase];
+        if (index >= kParamSlotLatchEnd)
+            return kNewestParams[index - kParamSlotLatchEnd];
         if (index >= kParamSlotLatchBase)
         {
             static const SlotOutputSpecs latches("Latched", "latched", 0.0f, 65535.0f,

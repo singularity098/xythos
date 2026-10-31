@@ -1495,6 +1495,8 @@ protected:
 
         case Hit::SetValue:
             setValue(static_cast<uint32_t>(hit->index), hit->value);
+            if (hit->index == static_cast<int>(kParamTunerStrobe)) // Needle or Strobe: the runes view is over them
+                setValue(kParamTunerRunes, 0.0f);
             return true;
 
         case Hit::Slider:
@@ -6272,10 +6274,14 @@ private:
         // header: view, mute, reference pitch
         const float hy = panel.y + 16.0f;
         label(panel.x + 16.0f, hy + 14.0f, "Tuner", theme::text, 16.0f, ALIGN_LEFT | ALIGN_MIDDLE);
-        const bool strobe = fParams[kParamTunerStrobe] >= 0.5f;
-        drawValueButton({ panel.x + 96.0f, hy, 76.0f, 28.0f }, "Needle", !strobe, Hit::SetValue, kParamTunerStrobe, 0);
-        drawValueButton({ panel.x + 176.0f, hy, 76.0f, 28.0f }, "Strobe", strobe, Hit::SetValue, kParamTunerStrobe, 1);
-        drawButton({ panel.x + 272.0f, hy, 76.0f, 28.0f }, "Mute", fParams[kParamTunerMute] >= 0.5f, theme::accent,
+        // the view: Runes (the default; owner, 2026-10-31) is a parameter of its own, over Needle/Strobe
+        const bool runes = fParams[kParamTunerRunes] >= 0.5f;
+        const bool strobe = !runes && fParams[kParamTunerStrobe] >= 0.5f;
+        drawValueButton({ panel.x + 96.0f, hy, 76.0f, 28.0f }, "Runes", runes, Hit::SetValue, kParamTunerRunes, 1);
+        drawValueButton({ panel.x + 176.0f, hy, 76.0f, 28.0f }, "Needle", !runes && !strobe, Hit::SetValue,
+                        kParamTunerStrobe, 0);
+        drawValueButton({ panel.x + 256.0f, hy, 76.0f, 28.0f }, "Strobe", strobe, Hit::SetValue, kParamTunerStrobe, 1);
+        drawButton({ panel.x + 352.0f, hy, 76.0f, 28.0f }, "Mute", fParams[kParamTunerMute] >= 0.5f, theme::accent,
                    Hit::Toggle, kParamTunerMute);
 
         char ref[32];
@@ -6317,7 +6323,9 @@ private:
         const float viewHeight = panel.y + panel.h - 16.0f - viewTop;
         if (viewHeight < 40.0f)
             return;
-        if (strobe)
+        if (runes)
+            drawRunes({ panel.x + 16.0f, viewTop, panel.w - 32.0f, viewHeight }, active, inTune, stateColor);
+        else if (strobe)
             drawStrobe({ cx - 300.0f, viewTop, 600.0f, std::min(viewHeight, 120.0f) }, active, inTune);
         else
             drawNeedle(cx, viewTop, viewHeight, active, inTune, stateColor);
@@ -6366,6 +6374,91 @@ private:
         circle(cx + std::cos(a) * track, cy + std::sin(a) * track, 5.0f);
         fillColor(!active ? unlit : inTune ? theme::good : color);
         fill();
+    }
+
+    // Runes (owner, 2026-10-31; concept 8 of the tuner mockups): a row of 21 crystal glyphs, 5 cents each over ±50,
+    // taller toward the centre, each with its own notches. The glyphs from the centre out to the pitch light up in the
+    // highlight, the one at the pitch in the state colour; in tune only the centre one is lit, green. Nothing moves
+    // but the pitch.
+    void drawRunes(const Rect& r, bool active, bool inTune, const Color& color)
+    {
+        constexpr int kGlyphs = 21, kCentre = kGlyphs / 2;
+        constexpr float kLabels = 24.0f; // the −50 … +50 labels under the row
+        const float scale = std::clamp((r.h - kLabels - 8.0f) / 150.0f, 0.35f, 1.0f);
+        const float pitch = std::min(32.0f, r.w / kGlyphs);
+        const float half = std::min(11.0f, pitch * 0.34f); // half a glyph's width
+        const float cy = r.y + 4.0f + 75.0f * scale;
+        const float x0 = r.x + r.w / 2 - kCentre * pitch;
+        const int at = active ? std::clamp(static_cast<int>(std::lround(fNeedleCents / 5.0f)) + kCentre, 0, kGlyphs - 1)
+                              : -1;
+        const Color unlit(1.0f, 1.0f, 1.0f, 0.16f);
+
+        auto glyph = [&](int i) {
+            const float x = x0 + i * pitch;
+            const float h = (150.0f - std::abs(i - kCentre) * 7.0f) * scale;
+            const float tip = std::min(10.0f * scale, half);
+            const float y0 = cy - h / 2, y1 = cy + h / 2;
+            beginPath();
+            moveTo(x - half, y0 + tip);
+            lineTo(x, y0);
+            lineTo(x + half, y0 + tip);
+            lineTo(x + half, y1 - tip);
+            lineTo(x, y1);
+            lineTo(x - half, y1 - tip);
+            closePath();
+        };
+        for (int i = 0; i < kGlyphs; ++i)
+        {
+            const bool trail = at >= 0 && i != at && (at > kCentre ? i >= kCentre && i < at : i <= kCentre && i > at);
+            glyph(i);
+            if (i == at)
+            {
+                fillColor(inTune ? theme::good : color);
+                fill();
+                strokeColor(inTune ? theme::good : color);
+            }
+            else if (trail)
+            {
+                fillColor(theme::accent.withAlpha(0.28f));
+                fill();
+                strokeColor(theme::accent);
+            }
+            else
+                strokeColor(i == kCentre ? theme::good.withAlpha(0.45f) : unlit); // the in-tune glyph
+            strokeWidth(1.0f);
+            stroke();
+
+            // the glyph's notches: two cuts from opposite sides, placed by its index, so each has its own pattern
+            const float x = x0 + i * pitch;
+            const float n1 = cy + static_cast<float>((i * 37) % 5 - 2) * 14.0f * scale;
+            const float n2 = cy - (static_cast<float>((i * 23) % 4) - 1.5f) * 22.0f * scale;
+            beginPath();
+            moveTo(x - half, n1);
+            lineTo(x + half * 0.27f, n1);
+            moveTo(x - half * 0.27f, n2);
+            lineTo(x + half, n2);
+            strokeColor(Color(0.0f, 0.0f, 0.0f, 0.85f));
+            strokeWidth(2.5f);
+            stroke();
+        }
+
+        // markers above and below the centre glyph, and the scale's labels
+        const float top = cy - 75.0f * scale - 4.0f, bottom = cy + 75.0f * scale + 4.0f;
+        const float mid = x0 + kCentre * pitch;
+        beginPath();
+        moveTo(mid - 7.0f, top - 9.0f);
+        lineTo(mid + 7.0f, top - 9.0f);
+        lineTo(mid, top - 1.0f);
+        closePath();
+        moveTo(mid - 7.0f, bottom + 9.0f);
+        lineTo(mid + 7.0f, bottom + 9.0f);
+        lineTo(mid, bottom + 1.0f);
+        closePath();
+        fillColor(Color(1.0f, 1.0f, 1.0f, 0.5f));
+        fill();
+        const float ly = bottom + 9.0f + kLabels / 2;
+        for (const auto& [i, text] : { std::pair { 0, "−50" }, { 5, "−25" }, { 15, "+25" }, { 20, "+50" } })
+            label(x0 + i * pitch, ly, text, theme::textDim, 11.0f, ALIGN_CENTER | ALIGN_MIDDLE);
     }
 
     // Strobe: three rows of bands (the fundamental and two octaves, like a Peterson strobe). They drift at a

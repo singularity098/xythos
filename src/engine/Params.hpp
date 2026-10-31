@@ -112,7 +112,10 @@ enum LaterParam : uint32_t {
     kParamSlotLatchBase,
     kParamSlotLatchEnd = kParamSlotLatchBase + kMaxBlocks,
 
-    kParamCount = kParamSlotLatchEnd
+    // added after the latches (each new one goes last: the indices are DAW automation IDs)
+    kParamTunerRunes = kParamSlotLatchEnd, // hidden, UI only: the Runes view (owner, 2026-10-31); over Tuner Strobe
+
+    kParamCount
 };
 
 constexpr uint32_t slotBypassParam(int slot)
