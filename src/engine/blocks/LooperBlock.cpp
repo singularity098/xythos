@@ -15,8 +15,9 @@ namespace xythos {
 
 namespace {
 
-constexpr uint32_t kFadeSamples = 256; // the loop's ends are faded this long when it's closed, so the seam doesn't click
+constexpr uint32_t kFadeSamples = 256; // the loop's end crossfades this long into what came just before its start
 constexpr float kClickGain = 0.8f;      // the clicks at Click 100%, as the metronome's default volume (up to 200%)
+constexpr double kMaxLatencyMs = 200.0;
 
 const char* const kModeChoices[] = { "Count In", "Free" };
 const char* const kBeatChoices[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12" };
@@ -44,6 +45,7 @@ public:
         fLevel.prepare(sampleRate);
         fFeedback.prepare(sampleRate);
         fFade.prepare(sampleRate, 0.005);
+        fLatency = latencySamples(fLatencyMs);
         fAccentClick = classicMetronomeClick(true, sampleRate);
         fBeatClick = classicMetronomeClick(false, sampleRate);
         fClickData = nullptr;
@@ -88,6 +90,10 @@ public:
         case kLooperParamMeasures: fMeasures = std::clamp(static_cast<int>(std::lround(value)), 1, 16); break;
         case kLooperParamLoops:    fLoops = std::clamp(static_cast<int>(std::lround(value)), 1, 8); break;
         case kLooperParamClick:    fClickLevel = std::clamp(value / 100.0f, 0.0f, 2.0f); break;
+        case kLooperParamLatency:
+            fLatencyMs = std::clamp(static_cast<double>(value), 0.0, kMaxLatencyMs);
+            fLatency = latencySamples(fLatencyMs);
+            break;
         case kLooperParamTap:
             if (on && !fTapHeld)
             {
@@ -130,7 +136,7 @@ public:
         status.state = fState;
         status.lengthTenths = static_cast<int>(fLength / fSampleRate * 10.0);
         if (fState == LooperState::CountIn)
-            status.progress = std::clamp(static_cast<int>(fClock / fBeatLength) + 1, 1, 99);
+            status.progress = std::clamp(static_cast<int>(fClock / fBeatLength) + 1, 1, std::max(1, fCountInClicks));
         else if (fState == LooperState::Recording)
             status.progress = fTimed ? std::min(99, static_cast<int>(uint64_t { fLength } * 100 / fRecLength)) : 0;
         else
@@ -148,9 +154,11 @@ private:
     // count-in is over, ends the overdub passes, and starts each click (process() plays it from fClickData)
     void tick()
     {
-        if (fState == LooperState::CountIn && fClock >= fRecStart)
+        if (fState == LooperState::CountIn && fClock >= fRecStart + fRecLatency)
         {
+            // a round trip after the downbeat's click: when what was played to it arrives
             fLength = 0;
+            fCloseOffset = fRecLatency;
             fState = LooperState::Recording;
         }
         if (fState == LooperState::Overdubbing && fClock >= fEnd)
@@ -160,7 +168,7 @@ private:
             fTimed = false;
             return;
         }
-        if (fClock < fEnd && fClock == static_cast<uint64_t>(std::llround(fNextClick * fBeatLength)))
+        if (fClock < fClickEnd && fClock == static_cast<uint64_t>(std::llround(fNextClick * fBeatLength)))
         {
             // the bar's first beat is accented: bars start where the recording does
             const int beat = ((fNextClick - fCountInClicks) % fBarBeats + fBarBeats) % fBarBeats;
@@ -174,6 +182,15 @@ private:
 
     void processSample(float* const* io, uint32_t numChannels, uint32_t i)
     {
+        // the input's last moments, kept for the seam: a recording starting now takes them as what led into it
+        if (fState == LooperState::Recording && fLength == 0)
+            for (uint32_t ch = 0; ch < 2; ++ch)
+                for (uint32_t k = 0; k < kFadeSamples; ++k)
+                    fPreroll[ch][k] = fRecent[ch][(fRecentPos + k) % kFadeSamples];
+        for (uint32_t ch = 0; ch < 2; ++ch)
+            fRecent[ch][fRecentPos] = io[numChannels > 1 ? ch : 0][i];
+        fRecentPos = (fRecentPos + 1) % kFadeSamples;
+
         const float level = fLevel.next();
         const float feedback = fFeedback.next();
         // playback fades in and out on start and stop
@@ -203,21 +220,31 @@ private:
         const auto index = static_cast<uint32_t>(fPosition);
         const double frac = fPosition - index;
         const uint32_t next = index + 1 < fLength ? index + 1 : 0;
+        const double step = (fHalf ? 0.5 : 1.0) * (fReverse ? -1.0 : 1.0);
+        // overdubs go where the playback was a round trip ago: what the player heard and played along to
+        uint32_t write = index;
+        if (fState == LooperState::Overdubbing && fLatency > 0)
+        {
+            const double length = static_cast<double>(fLength);
+            double at = std::fmod(fPosition - step * static_cast<double>(fLatency), length);
+            if (at < 0.0)
+                at += length;
+            write = std::min(static_cast<uint32_t>(at), fLength - 1);
+        }
         for (uint32_t ch = 0; ch < numChannels; ++ch)
         {
             std::vector<float>& buffer = fBuffer[ch];
             const float played = static_cast<float>(buffer[index] + (buffer[next] - buffer[index]) * frac);
             if (fState == LooperState::Overdubbing)
-                buffer[index] = buffer[index] * feedback + io[ch][i];
+                buffer[write] = buffer[write] * feedback + io[ch][i];
             io[ch][i] += played * level * fade;
         }
         if (fState == LooperState::Overdubbing && numChannels == 1)
-            fBuffer[1][index] = fBuffer[0][index];
+            fBuffer[1][write] = fBuffer[0][write];
 
         if (fState != LooperState::Stopped)
         {
-            const double step = fHalf ? 0.5 : 1.0;
-            fPosition += fReverse ? -step : step;
+            fPosition += step;
             if (fPosition >= fLength)
                 fPosition -= fLength;
             if (fPosition < 0.0)
@@ -235,7 +262,10 @@ private:
         fRecStart = static_cast<uint64_t>(std::llround(fCountIn * fBeatLength));
         fRecLength = static_cast<uint32_t>(
             std::clamp<long long>(std::llround(fMeasures * fBeats * fBeatLength), kFadeSamples * 4, kLooperMaxSamples));
-        fEnd = fRecStart + uint64_t { fRecLength } * static_cast<uint64_t>(fPasses);
+        fRecLatency = std::min(fLatency, fRecLength / 2);
+        // the clicks stop on the grid; the passes, which run a round trip late, that much after
+        fClickEnd = fRecStart + uint64_t { fRecLength } * static_cast<uint64_t>(fPasses);
+        fEnd = fClickEnd + fRecLatency;
         fClock = 0;
         fNextClick = 0;
         fTimed = true;
@@ -254,6 +284,7 @@ private:
                 break;
             }
             fLength = 0;
+            fCloseOffset = 0;
             fState = LooperState::Recording;
             break;
         case LooperState::CountIn:
@@ -310,17 +341,20 @@ private:
             clear();
             return;
         }
-        // fade the ends so the seam doesn't click
-        for (std::vector<float>& buffer : fBuffer)
+        // the seam: the loop's last moments crossfade into what was played just before its start, so the end runs on
+        // into the start without a click, and the start (a downbeat's attack, often) stays as it was played
+        for (uint32_t ch = 0; ch < 2; ++ch)
         {
+            std::vector<float>& buffer = fBuffer[ch];
             for (uint32_t k = 0; k < kFadeSamples; ++k)
             {
-                const float g = static_cast<float>(k) / kFadeSamples;
-                buffer[k] *= g;
-                buffer[fLength - 1 - k] *= g;
+                const float g = static_cast<float>(k + 1) / kFadeSamples;
+                float& sample = buffer[fLength - kFadeSamples + k];
+                sample += (fPreroll[ch][k] - sample) * g;
             }
         }
-        fPosition = 0.0;
+        // Count In mode: the playback carries on from a round trip in, where the clicks' grid is now
+        fPosition = static_cast<double>(std::min(fCloseOffset, fLength - 1));
         fState = LooperState::Playing;
         fFade.snap(1.0f);
     }
@@ -354,6 +388,16 @@ private:
     TapTempo fTapTempo;
     uint64_t fSamples = 0;
     bool fTapHeld = false;
+    // the input's last kFadeSamples (a ring), and what led into the recording, for the seam
+    float fRecent[2][kFadeSamples] = {};
+    uint32_t fRecentPos = 0;
+    float fPreroll[2][kFadeSamples] = {};
+    // Latency: the round trip, in ms and in samples
+    double fLatencyMs = 0.0;
+    uint32_t fLatency = 0;
+    uint32_t fCloseOffset = 0; // where the playback starts when the recording closes (Count In: its round trip)
+
+    uint32_t latencySamples(double ms) const { return static_cast<uint32_t>(std::lround(ms * fSampleRate / 1000.0)); }
     float* fClickOut = nullptr; // the engine's click bus (setClickOutput()), or none
     // the timeline, in samples from the press (fTimed while it runs: counting in, recording, overdub passes)
     bool fTimed = false;
@@ -364,6 +408,8 @@ private:
     uint64_t fRecStart = 0;   // when the recording starts
     uint32_t fRecLength = 0;  // the loop's length
     uint64_t fEnd = 0;        // when the last pass ends
+    uint64_t fClickEnd = 0;   // when the clicks stop (the last pass's end on the grid)
+    uint32_t fRecLatency = 0; // the round trip, as the count-in took it
     // the clicks (the metronome's Classic sound), one at a time
     std::vector<float> fAccentClick, fBeatClick;
     const std::vector<float>* fClickData = nullptr;
@@ -394,6 +440,7 @@ const BlockDescriptor kLooperBlockDescriptor = {
         ParamSpec { "Loops", "", 1.0f, 8.0f, 1.0f, ParamScale::Choice, kLoopChoices },
         ParamSpec { "Click", "%", 0.0f, 200.0f, 150.0f, ParamScale::Linear },
         ParamSpec { "Tap", "", 0.0f, 1.0f, 0.0f, ParamScale::Momentary },
+        ParamSpec { "Latency", "ms", 0.0f, 200.0f, 10.0f, ParamScale::Linear },
     },
     [] { return std::unique_ptr<Block>(new LooperBlock()); },
     -1,

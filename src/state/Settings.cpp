@@ -34,6 +34,7 @@ std::string Settings::toJson() const
         { "cabImages", cabImages },
         { "pedalImages", pedalImages },
         { "ampImages", ampImages },
+        { "blockDefaults", blockDefaults },
     }.dump(2);
 }
 
@@ -76,6 +77,7 @@ Settings Settings::fromJson(std::string_view text)
         get("cabImages", settings.cabImages);
         get("pedalImages", settings.pedalImages);
         get("ampImages", settings.ampImages);
+        get("blockDefaults", settings.blockDefaults);
     }
     catch (const json::exception&)
     {

@@ -13,4 +13,10 @@ namespace xythos {
 // so calling it every frame only does the work once per window. Linux (GLX) only; a no-op elsewhere.
 void disableVsync(uintptr_t& done);
 
+// Gives the window whose OpenGL context is current its own arrow cursor (call it while drawing). An X11 window without
+// a cursor shows its parent's: in Reaper, the FX window's resize cursor stayed on over the whole plugin after the
+// pointer crossed the window's border. pugl doesn't define one (its puglSetCursor() skips the arrow it starts with).
+// `done` is the drawable it was last applied to, as for disableVsync(). Linux (X11) only; a no-op elsewhere.
+void defineArrowCursor(uintptr_t& done);
+
 } // namespace xythos

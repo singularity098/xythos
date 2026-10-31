@@ -147,6 +147,7 @@ constexpr float kKnobRadius = 22.0f;
 // Block panel: one cell per control, right-justified next to the block image
 constexpr float kCellWidth = 96.0f;
 constexpr float kCellHeight = 128.0f;
+constexpr float kCompactCellHeight = 104.0f; // rows this tight when that makes room for two
 constexpr float kPanelMargin = 16.0f;
 constexpr float kListBarWidth = 14.0f; // a dialog list's scroll bar, at its right edge
 constexpr uint kDoubleClickMs = 350;
@@ -263,6 +264,8 @@ enum class Hit {
     PresetDefault,  // index = row in fPresetRows: make it the default (again: no default)
     PresetDelete,   // index = row in fPresetRows: the first click asks, the second deletes
     BlockImage,     // the block panel's Image button: index = position in the chain
+    SetDefaults,    // the block panel's Set as Default: index = position in the chain
+    ClearDefaults,  // ... and Clear Default: index = position in the chain
     ImageChoose,    // Images dialog: index = image in fImageList, -1 for the stock image
     ImageDelete,    // index = image in fImageList: the first click asks, the second deletes
     ImageAdd,       // add an image file to the library and use it
@@ -803,6 +806,7 @@ protected:
     {
         const auto drawStart = std::chrono::steady_clock::now();
         disableVsync(fVsyncDrawable);
+        defineArrowCursor(fCursorDrawable);
         const float scale = static_cast<float>(getScaleFactor());
         fWidth = getWidth() / scale;
         fHeight = getHeight() / scale;
@@ -930,6 +934,7 @@ protected:
                 return true;
             }
             fDragParam = hit->index;
+            fDragStartX = x;
             fDragStartY = y;
             fDragStartValue = normalized(hit->index);
             editParameter(hit->index, true);
@@ -1354,9 +1359,17 @@ protected:
             openImagesDialog(hit->index);
             return true;
 
-        case Hit::CabImage:
-            openCabDialog(hit->index);
+        case Hit::SetDefaults:
+            setBlockDefaults(hit->index);
             return true;
+
+        case Hit::ClearDefaults:
+            if (hit->index >= 0 && hit->index < static_cast<int>(fChain.blocks.size()))
+                clearBlockDefaults(fChain.blocks[hit->index].typeId);
+            return true;
+
+        case Hit::CabImage:
+            return false; // the panel's image picks another on a right-click only (owner, 2026-10-31)
 
         case Hit::CabSection:
             if (hit->index >= 0 && hit->index < static_cast<int>(fCabOpen.size()))
@@ -1381,6 +1394,9 @@ protected:
                 else
                     picks[key] = id;
             });
+            // opened for a block that shows one of the user's images: the built-in photo picked replaces it
+            if (const BlockState* block = imagesBlock(); block && !block->image.empty())
+                setBlockImage(fImagesBlock, std::string());
             closeDialog();
             return true;
         }
@@ -1584,11 +1600,13 @@ protected:
         }
         if (fDragParam >= 0)
         {
-            // 200 px for the full range; Shift for fine control
+            // 200 px for the full range, up or right; Shift for fine control
             const float range = (ev.mod & kModifierShift) ? 2000.0f : 200.0f;
-            const float value = std::clamp(fDragStartValue + (fDragStartY - y) / range, 0.0f, 1.0f);
+            const float value =
+                std::clamp(fDragStartValue + ((fDragStartY - y) + (x - fDragStartX)) / range, 0.0f, 1.0f);
             setNormalized(static_cast<uint32_t>(fDragParam), value, false);
             fDragStartValue = value;
+            fDragStartX = x;
             fDragStartY = y;
             return true;
         }
@@ -1827,15 +1845,17 @@ protected:
         {
             // the host has the old blocks' unused values (0; -12 dB for NAM tone): the defaults first, then the chain
             // that turns them on
-            const std::vector<int> slots = std::exchange(fMigratedSlots, {});
+            const std::vector<MigratedSlot> migrated = std::exchange(fMigratedSlots, {});
             for (BlockState& block : fChain.blocks)
             {
-                const Migration* migration = migrationFor(block.typeId);
-                if (migration == nullptr || std::find(slots.begin(), slots.end(), block.slot) == slots.end())
-                    continue;
-                setMigratedDefaults(block, *migration);
-                for (int p = migration->first; p <= migration->last; ++p)
-                    setHostParameter(slotParam(block.slot, p), block.params[p]);
+                for (const MigratedSlot& done : migrated)
+                {
+                    if (done.slot != block.slot || block.typeId != done.migration->type->typeId)
+                        continue;
+                    setMigratedDefaults(block, *done.migration);
+                    for (int p = done.migration->first; p <= done.migration->last; ++p)
+                        setHostParameter(slotParam(block.slot, p), block.params[p]);
+                }
             }
             fSavedChain = fChain;
             sendChain();
@@ -1954,11 +1974,59 @@ private:
     {
         if (isSlot(index))
         {
+            // the user's own default for the block's type (Set as Default), else the type's
+            const uint32_t offset = index - kSlotParamBase;
+            const int param = static_cast<int>(offset % kSlotParamCount) - 1;
+            const int block = indexOfSlot(static_cast<int>(offset / kSlotParamCount));
+            if (param >= 0 && block >= 0)
+                if (const BlockDescriptor* type = BlockRegistry::builtin().find(fChain.blocks[block].typeId);
+                    type && param < type->numParams)
+                    return blockDefault(*type, param);
             const ParamSpec* spec = slotSpec(index);
             return spec ? spec->toNormalized(spec->def) : 0.0f;
         }
         const GlobalParamSpec& spec = globalParamSpec(index);
         return (spec.def - spec.min) / (spec.max - spec.min);
+    }
+
+    // Control `param` of a new block of `type`, normalized: the user's default (Settings::blockDefaults) or the type's
+    float blockDefault(const BlockDescriptor& type, int param) const
+    {
+        const ParamSpec& spec = type.params[param];
+        if (const auto defaults = fSettings.blockDefaults.find(type.typeId); defaults != fSettings.blockDefaults.end())
+            if (const auto value = defaults->second.find(spec.name); value != defaults->second.end())
+                return std::clamp(spec.toNormalized(value->second), 0.0f, 1.0f);
+        return spec.toNormalized(spec.def);
+    }
+
+    bool hasBlockDefaults(const std::string& typeId) const { return fSettings.blockDefaults.count(typeId) != 0; }
+
+    // Set as Default: block `index`'s values become what new blocks of its type start with (not the footswitch
+    // actions, which are only ever pressed)
+    void setBlockDefaults(int index)
+    {
+        if (index < 0 || index >= static_cast<int>(fChain.blocks.size()))
+            return;
+        const BlockState& block = fChain.blocks[index];
+        const BlockDescriptor* type = BlockRegistry::builtin().find(block.typeId);
+        if (type == nullptr)
+            return;
+        std::map<std::string, float> values;
+        for (int p = 0; p < type->numParams; ++p)
+        {
+            const ParamSpec& spec = type->params[p];
+            if (spec.scale != ParamScale::Momentary)
+                values[spec.name] = spec.toValue(fParams[slotParam(block.slot, p)]);
+        }
+        updateSettings([&](Settings& settings) { settings.blockDefaults[type->typeId] = values; });
+        showToast(std::string("New ") + type->displayName + " blocks start with these settings");
+    }
+
+    void clearBlockDefaults(const std::string& typeId)
+    {
+        updateSettings([&](Settings& settings) { settings.blockDefaults.erase(typeId); });
+        if (const BlockDescriptor* type = BlockRegistry::builtin().find(typeId))
+            showToast(std::string("New ") + type->displayName + " blocks start with the stock settings again");
     }
 
     void setNormalized(uint32_t index, float n, bool gesture)
@@ -2230,14 +2298,21 @@ private:
     {
         if (block < 0 || block >= static_cast<int>(fChain.blocks.size()))
             return;
+        const BlockState& state = fChain.blocks[block];
+        if (state.typeId == kIrBlockDescriptor.typeId || isNamPedal(state) || isNamAmp(state))
+        {
+            // the built-in photos to pick from and the user's own, in one dialog (owner, 2026-10-31)
+            openCabDialog(block);
+            return;
+        }
         fImagesBlock = block;
-        fImageKind = imageKindFor(fChain.blocks[block].typeId);
+        fImageKind = imageKindFor(state.typeId);
         fImageList = listUserImages(fImageKind);
         fImageDeleteArmed.clear();
         openDialog(Dialog::Images);
     }
 
-    // The Cab Image dialog for the IR block at `block`
+    // The image chooser for the IR (or NAM pedal or amp) block at `block`: the built-in photos, and the user's own
     void openCabDialog(int block)
     {
         if (block < 0 || block >= static_cast<int>(fChain.blocks.size()))
@@ -2245,6 +2320,11 @@ private:
         const BlockState& state = fChain.blocks[block];
         openCabDialog(state.config.value("hash", std::string()), state.config.value("path", std::string()),
                       isNamPedal(state) ? PhotoKind::Pedal : isNamAmp(state) ? PhotoKind::Amp : PhotoKind::Cab);
+        // for a block, the user's own images too (its kind's library)
+        fImagesBlock = block;
+        fImageKind = imageKindFor(state.typeId);
+        fImageList = listUserImages(fImageKind);
+        fImageDeleteArmed.clear();
     }
 
     // The Cab Image dialog for an IR file (its content hash and path), or the Pedal Image dialog for a NAM pedal
@@ -2252,6 +2332,7 @@ private:
     void openCabDialog(const std::string& hash, const std::string& path, PhotoKind kind = PhotoKind::Cab)
     {
         const bool pedal = kind != PhotoKind::Cab;
+        fImagesBlock = -1; // from Add Block: a file, not a block (openCabDialog(int) sets it)
         fCabHash = hash;
         fCabPath = path;
         fCabKind = kind;
@@ -2307,9 +2388,39 @@ private:
     void openReplaceDialog(int block)
     {
         fReplaceSlot = fChain.blocks[block].slot;
-        if (const BlockDescriptor* type = BlockRegistry::builtin().find(fChain.blocks[block].typeId))
+        const BlockDescriptor* type = BlockRegistry::builtin().find(fChain.blocks[block].typeId);
+        if (type)
             fDialogCategory = type->category;
         openDialog(Dialog::AddBlock);
+        // a NAM or IR block: its file's folder, with the file picked, so similar files are a click away (owner,
+        // 2026-10-31)
+        if (type == &kNamBlockDescriptor || type == &kIrBlockDescriptor)
+        {
+            const std::string path = fChain.blocks[block].config.value("path", std::string());
+            const std::string hash = fChain.blocks[block].config.value("hash", std::string());
+            const std::vector<LibraryEntry>& library = type == &kIrBlockDescriptor ? fIrLibrary : fNamLibrary;
+            const LibraryEntry* found = nullptr;
+            for (const LibraryEntry& entry : library)
+                if (!path.empty() && entry.path == path)
+                {
+                    found = &entry;
+                    break;
+                }
+            if (found == nullptr && !hash.empty())
+                for (const LibraryEntry& entry : library)
+                    if (entry.hash == hash)
+                    {
+                        found = &entry;
+                        break;
+                    }
+            if (found != nullptr)
+            {
+                fFavoritesOnly = false;
+                openLibraryDir(found->folder);
+                fPickKey = "file:" + found->path;
+                fScrollToPick = true;
+            }
+        }
     }
 
     // Controls added to a block type after it was released: blocks saved before them lack the config key, and
@@ -2322,15 +2433,14 @@ private:
     static constexpr Migration kMigrations[] = {
         { &kNamBlockDescriptor, kNamToneKey, kNamParamBass, kNamParamTreble },             // NamBlock.hpp
         { &kLooperBlockDescriptor, kLooperCountInKey, kLooperParamMode, kLooperParamClick }, // LooperBlock.hpp
+        { &kLooperBlockDescriptor, kLooperLatencyKey, kLooperParamLatency, kLooperParamLatency },
     };
 
-    static const Migration* migrationFor(const std::string& typeId)
-    {
-        for (const Migration& migration : kMigrations)
-            if (typeId == migration.type->typeId)
-                return &migration;
-        return nullptr;
-    }
+    // A block's migration: the slot and which one (a type can have several)
+    struct MigratedSlot {
+        int slot;
+        const Migration* migration;
+    };
 
     // Sets a migrated block's new controls to their defaults (NAM tone: 0 dB, flat)
     static void setMigratedDefaults(BlockState& block, const Migration& migration)
@@ -2343,18 +2453,20 @@ private:
     }
 
     // Blocks from before their type's later controls (kMigrations) get them at their defaults, and the config marks
-    // them, so the DSP applies them. Returns the slots changed.
-    static std::vector<int> migrateBlocks(ChainState& chain)
+    // them, so the DSP applies them. Returns the migrations done.
+    static std::vector<MigratedSlot> migrateBlocks(ChainState& chain)
     {
-        std::vector<int> changed;
+        std::vector<MigratedSlot> changed;
         for (BlockState& block : chain.blocks)
         {
-            const Migration* migration = migrationFor(block.typeId);
-            if (migration == nullptr || block.config.contains(migration->key))
-                continue;
-            setMigratedDefaults(block, *migration);
-            block.config[migration->key] = true;
-            changed.push_back(block.slot);
+            for (const Migration& migration : kMigrations)
+            {
+                if (block.typeId != migration.type->typeId || block.config.contains(migration.key))
+                    continue;
+                setMigratedDefaults(block, migration);
+                block.config[migration.key] = true;
+                changed.push_back({ static_cast<int>(block.slot), &migration });
+            }
         }
         return changed;
     }
@@ -2797,7 +2909,7 @@ private:
             return false;
         if (hit->kind == Hit::CabImage)
         {
-            openCabDialog(hit->index);
+            openImagesDialog(hit->index);
             return true;
         }
 
@@ -2828,12 +2940,7 @@ private:
             };
             entries.push_back({ "Replace", MenuAction::ReplaceBlock });
             entries.push_back({ "Remove", MenuAction::RemoveBlock });
-            if (fChain.blocks[hit->index].typeId == kIrBlockDescriptor.typeId && userImage(fChain.blocks[hit->index]) == nullptr)
-                entries.push_back({ "Cab Image…", MenuAction::CabImage });
-            if (isNamPedal(fChain.blocks[hit->index]) && userImage(fChain.blocks[hit->index]) == nullptr)
-                entries.push_back({ "Pedal Image…", MenuAction::CabImage });
-            if (isNamAmp(fChain.blocks[hit->index]) && userImage(fChain.blocks[hit->index]) == nullptr)
-                entries.push_back({ "Amp Image…", MenuAction::CabImage });
+            entries.push_back({ "Image…", MenuAction::CabImage });
             entries.push_back({ "Copy", MenuAction::CopyBlock });
             if (gBlockClipboard)
                 entries.push_back({ "Paste after", MenuAction::PasteBlock });
@@ -3021,7 +3128,7 @@ private:
                 openPreset(fMenuPresets[entry.arg]);
             break;
         case MenuAction::CabImage:
-            openCabDialog(fMenuTile);
+            openImagesDialog(fMenuTile);
             break;
         case MenuAction::SetLookahead:
             if (fMenuTile >= 0 && fMenuTile < static_cast<int>(fChain.blocks.size()))
@@ -3935,7 +4042,7 @@ private:
             const ParamSpec& spec = type->params[p];
             block.params[p] = spec.toNormalized(spec.def);
         }
-        // defaults from Settings
+        // defaults from Settings (the user's own for the type, Set as Default, come after these)
         if (type == &kNamBlockDescriptor)
         {
             block.config["a2Size"] = fSettings.a2Lite ? 0.0 : 1.0;
@@ -3945,11 +4052,15 @@ private:
         else if (type == &kLooperBlockDescriptor)
         {
             block.config[kLooperCountInKey] = true;
+            block.config[kLooperLatencyKey] = true;
         }
         else if (type == &kIrBlockDescriptor)
         {
             block.params[kIrParamNormalize] = fSettings.normalize ? 1.0f : 0.0f;
         }
+        if (hasBlockDefaults(type->typeId))
+            for (int p = 0; p < type->numParams; ++p)
+                block.params[p] = blockDefault(*type, p);
         for (int p = 0; p < type->numParams; ++p)
             setHostParameter(slotParam(slot, p), block.params[p]);
 
@@ -4820,20 +4931,25 @@ private:
                          "The amp head shown for this NAM model. Each model gets one of the built-in heads from its "
                          "file's content, one that suits the style its name suggests (clean, jazz, crunch, lead, or "
                          "very heavy for the strangest heads). Its knobs turn the block's Input, Bass, Middle, Treble "
-                         "and Output, and its power switch turns the block on or off. Right-click it to pick another "
-                         "head: your pick follows the file into every chain and preset, until you pick again or reset "
-                         "it to the default. You can also right-click a model in Add Block." };
+                         "and Output, and its power switch turns the block on or off. Right-click it (or use Image…) "
+                         "to pick another head or one of your own images: a built-in pick follows the file into every "
+                         "chain and preset, until you pick again or reset it to the default." };
             if (hit.index >= 0 && hit.index < static_cast<int>(fChain.blocks.size()) && isNamPedal(fChain.blocks[hit.index]))
                 return { "Pedal Image",
                          "The pedal shown for this NAM pedal capture. Each capture gets one of the built-in pedals "
-                         "from its file's content. Right-click it to pick another: your pick follows the file into "
+                         "from its file's content. Right-click it (or use Image…) to pick another or one of your own "
+                         "images: a built-in pick follows the file into every chain and preset, until you pick again "
+                         "or reset it to the default." };
+            if (hit.index >= 0 && hit.index < static_cast<int>(fChain.blocks.size())
+                && fChain.blocks[hit.index].typeId == kIrBlockDescriptor.typeId)
+                return { "Cab Image",
+                         "The speaker cabinet shown for this IR. Each IR gets one of the built-in cabs from its file's "
+                         "content (one of the size its name gives, like 4x12, if it gives one). Right-click it (or use "
+                         "Image…) to pick another or one of your own images: a built-in pick follows the IR file into "
                          "every chain and preset, until you pick again or reset it to the default. You can also "
-                         "right-click a pedal capture in Add Block." };
-            return { "Cab Image",
-                     "The speaker cabinet shown for this IR. Each IR gets one of the built-in cabs from its file's "
-                     "content (one of the size its name gives, like 4x12, if it gives one). Right-click it to pick "
-                     "another: your pick follows the IR file into every chain and preset, until you pick again or "
-                     "reset it to the default. You can also right-click an IR in Add Block." };
+                         "right-click an IR in Add Block." };
+            return { "Block Image",
+                     "This block's image. Right-click it (or use Image…) to show one of your own images instead." };
         case Hit::CabChoose:
             if (hit.index < 0)
                 return { "Reset to Default",
@@ -4846,10 +4962,22 @@ private:
             return {};
         case Hit::BlockImage:
             return { "Image",
-                     "Shows this block with an image of your own instead of its stock one, from your library of amp, "
-                     "cab or pedal images. Add a photo of your real gear (PNG, JPEG or WebP) and pick it. Your "
-                     "images are shown as they are, with no knobs, power light or footswitch on them. Deleting an "
-                     "image from the library puts the stock image back on the blocks that used it." };
+                     "Picks the image this block shows: its stock image (for IRs and NAM models, any of the built-in "
+                     "cabs, pedals or amp heads) or one of your own, from your library of amp, cab or pedal images. "
+                     "Add a photo of your real gear (PNG, JPEG or WebP) and pick it. Your images are shown as they "
+                     "are, with no knobs, power light or footswitch on them. Deleting an image from the library puts "
+                     "the stock image back on the blocks that used it. Right-clicking the block's image opens the "
+                     "same chooser." };
+        case Hit::SetDefaults:
+            return { "Set as Default",
+                     "Makes this block's current settings the ones new blocks of its type start with, in every "
+                     "instance, instead of the stock ones. Double-clicking a control (or Reset to default in its "
+                     "menu) goes back to your default too. Blocks already in a chain don't change. Clear Default "
+                     "puts the stock settings back." };
+        case Hit::ClearDefaults:
+            return { "Clear Default",
+                     "Forgets the settings you saved with Set as Default for this block type: new blocks start with "
+                     "the stock settings again. Blocks already in a chain don't change." };
         case Hit::ImageAdd:
             return { "Add Image",
                      "Picks an image file (8-bit PNG, JPEG or WebP) and copies it into your library, so it stays "
@@ -6897,7 +7025,10 @@ private:
         const float imageMaxH = height - 2 * kPanelMargin;
         const float imageMaxW = (imageMaxH - 2 * kImagePad) * aspect + 2 * kImagePad;
         const float rowsSpace = height - kHeaderHeight - kPanelMargin;
-        const int rowsAvailable = std::max(1, static_cast<int>(rowsSpace / kCellHeight));
+        // two rows fit in less height with the rows a little tighter (a split's shorter panel: owner, 2026-10-31)
+        int rowsAvailable = std::max(1, static_cast<int>(rowsSpace / kCellHeight));
+        if (rowsAvailable < 2 && rowsSpace >= 2 * kCompactCellHeight)
+            rowsAvailable = 2;
         const int minColumns = (count + rowsAvailable - 1) / rowsAvailable;
         const float freeWidth = width - 3 * kPanelMargin;
         int columns = std::max(count, 1);
@@ -6919,10 +7050,9 @@ private:
         {
             surface(imageX, imageY, imageW, imageH, 8.0f, Surface::Inset);
             const bool bypassed = fParams[slotBypassParam(block.slot)] >= 0.5f;
-            // an IR's cab image, or a NAM pedal's pedal image: right-click (or click) to pick another; under the
-            // image's footswitch, which drawBlockImage() adds
-            if (img && (type == &kIrBlockDescriptor || isNamPedal(block) || isNamAmp(block)) && userImage(block) == nullptr)
-                fHits.push_back({ { imageX, imageY, imageW, imageH }, Hit::CabImage, fSelected });
+            // right-click the image to pick another (the Image… button's dialog); under the image's footswitch and
+            // knobs, which drawBlockImage() adds
+            fHits.push_back({ { imageX, imageY, imageW, imageH }, Hit::CabImage, fSelected });
             globalAlpha(bypassed ? 0.35f : 1.0f);
             const Led led = bypassed ? Led::Off : Led::On;
             if (img)
@@ -6939,9 +7069,20 @@ private:
         const std::string path = block.config.value("path", std::string());
         const Rect imageButton { left + width - kPanelMargin - 92.0f, top + 14.0f, 92.0f, 28.0f };
         drawButton(imageButton, "Image…", userImage(block) != nullptr, theme::accent, Hit::BlockImage, fSelected);
+        // the user's own defaults for new blocks of this type (owner, 2026-10-31)
+        float buttonsX = imageButton.x;
+        if (hasBlockDefaults(type->typeId))
+        {
+            const Rect clear { buttonsX - 8.0f - 108.0f, imageButton.y, 108.0f, imageButton.h };
+            drawButton(clear, "Clear Default", false, theme::accent, Hit::ClearDefaults, fSelected);
+            buttonsX = clear.x;
+        }
+        const Rect setDefault { buttonsX - 8.0f - 112.0f, imageButton.y, 112.0f, imageButton.h };
+        drawButton(setDefault, "Set as Default", false, theme::accent, Hit::SetDefaults, fSelected);
+        buttonsX = setDefault.x;
         fontSize(16.0f);
         const std::string name = fitText(path.empty() ? type->displayName : fileStem(path),
-                                         std::max(0.0f, imageButton.x - 12.0f - textX));
+                                         std::max(0.0f, buttonsX - 12.0f - textX));
         label(textX, top + 28.0f, name.c_str(), theme::text, 16.0f, ALIGN_LEFT | ALIGN_MIDDLE);
         // the slot names the block's parameters in the DAW ("Slot 05 P2")
         char slotText[32];
@@ -6955,7 +7096,7 @@ private:
                 detail = text + "  ·  " + detail;
         }
         fontSize(11.0f);
-        detail = fitText(detail, std::max(0.0f, imageButton.x - 12.0f - textX));
+        detail = fitText(detail, std::max(0.0f, buttonsX - 12.0f - textX));
         label(textX, top + 54.0f, detail.c_str(), theme::textDim, 11.0f, ALIGN_LEFT | ALIGN_MIDDLE);
 
         if (const CabProblem cab = path.empty() || !fileExists(path) ? CabProblem::None : cabProblem(fSelected);
@@ -6990,7 +7131,11 @@ private:
         const float gridLeft = showImage ? textX : left + kPanelMargin;
         const float gridWidth = left + width - kPanelMargin - gridLeft;
         const float cellW = std::clamp(gridWidth / columns, cellWidth, cellWidth * 1.6f);
-        const float rowH = std::clamp(rowsSpace / rows, kCellHeight, kCellHeight * 1.35f);
+        const float rowH = std::clamp(rowsSpace / rows, rows * kCellHeight > rowsSpace ? kCompactCellHeight : kCellHeight,
+                                      kCellHeight * 1.35f);
+        // where a cell's knob centre is below its top: the content (knob ticks to value text) is about 96 px high
+        const float knobDrop = rowH >= kCellHeight ? (rowH - kCellHeight) / 2 + 8.0f + kKnobRadius + 6.0f
+                                                   : (rowH - 96.0f) / 2 + 28.0f;
         const float gridTop = top + kHeaderHeight + std::max(0.0f, (rowsSpace - rows * rowH) / 2);
         const float gridMid = gridLeft + gridWidth / 2;
         fDimControls = fParams[slotBypassParam(block.slot)] >= 0.5f;
@@ -7000,7 +7145,7 @@ private:
             const int col = i % columns;
             const int inRow = row == rows - 1 ? count - row * columns : columns;
             const float cx = gridMid + (col - (inRow - 1) / 2.0f) * cellW;
-            const float cy = gridTop + row * rowH + (rowH - kCellHeight) / 2 + 8.0f + kKnobRadius + 6.0f;
+            const float cy = gridTop + row * rowH + knobDrop;
             const Control& control = controls[i];
 
             if (control.cell == Cell::A2Size)
@@ -8086,14 +8231,26 @@ private:
             for (const char* size : kCabSizes)
                 sizes.push_back(cabImagesOfSize(ids, size));
         const auto open = [&](size_t i) { return pedal || fCabOpen[i]; };
+        // opened for a block: the user's own images first, then an Add Image… tile (owner, 2026-10-31: one chooser)
+        const BlockState* block = imagesBlock();
+        const bool own = block != nullptr && !block->image.empty()
+                      && std::any_of(fImageList.begin(), fImageList.end(),
+                                     [&](const UserImage& image) { return image.id == block->image; });
+        const size_t ownTiles = block != nullptr ? fImageList.size() + 1 : 0;
 
         constexpr float groupH = 30.0f, sectionH = 40.0f, gap = 10.0f;
         const float tile = amp ? 160.0f : 124.0f; // the heads are wide
+        const float tileH = amp ? tile * 0.62f : tile;
         const float listX = x + 16.0f, listY = y + 66.0f, listH = h - 66.0f - 64.0f;
         float listW = w - 32.0f;
         const auto columnsFor = [&](float width) { return std::max(1, static_cast<int>((width + gap) / (tile + gap))); };
+        const auto ownHeight = [&](int columns) {
+            return ownTiles == 0 ? 0.0f
+                                 : groupH + ((ownTiles + columns - 1) / columns) * (tileH + gap) + gap
+                                       + (pedal ? groupH : 0.0f);
+        };
         const auto contentFor = [&](int columns) {
-            float total = pedal ? 0.0f : 2 * groupH;
+            float total = (pedal ? 0.0f : 2 * groupH) + ownHeight(columns);
             for (size_t i = 0; i < sizes.size(); ++i)
             {
                 total += pedal ? 0.0f : sectionH;
@@ -8124,6 +8281,74 @@ private:
         save();
         scissor(listX, listY, listW, listH);
         float ry = listY - fListScroll;
+        if (ownTiles > 0)
+        {
+            if (visible(ry, groupH))
+                label(listX + 4.0f, ry + groupH - 10.0f, "Your images", theme::accent, 12.0f, ALIGN_LEFT | ALIGN_MIDDLE);
+            ry += groupH;
+            for (size_t k = 0; k < ownTiles; ++k)
+            {
+                const Rect r { listX + (k % columns) * (tile + gap), ry + (k / columns) * (tileH + gap), tile, tileH };
+                if (!visible(r.y, r.h))
+                    continue;
+                const bool hover = r.contains(fMouseX, fMouseY) && fMouseY >= listY && fMouseY < listY + listH;
+                surface(r.x, r.y, r.w, r.h, 6.0f, Surface::Item, hover);
+                if (k == fImageList.size())
+                {
+                    // the last tile adds one: a plus and its name
+                    const float cx = r.x + r.w / 2, cy = r.y + r.h / 2 - 8.0f, arm = 12.0f;
+                    beginPath();
+                    moveTo(cx - arm, cy);
+                    lineTo(cx + arm, cy);
+                    moveTo(cx, cy - arm);
+                    lineTo(cx, cy + arm);
+                    strokeColor(hover ? theme::accent : theme::textDim);
+                    strokeWidth(1.5f);
+                    stroke();
+                    label(cx, cy + arm + 14.0f, "Add Image…", hover ? theme::accent : theme::text, 12.0f,
+                          ALIGN_CENTER | ALIGN_MIDDLE);
+                    fHits.push_back({ clipped(r), Hit::ImageAdd, 0 });
+                    continue;
+                }
+                const UserImage& image = fImageList[k];
+                if (NanoImage* img = this->image(image.path))
+                    drawImageFit(*img, r.x + 6.0f, r.y + 6.0f, r.w - 12.0f, r.h - 26.0f, 3.0f);
+                else
+                    label(r.x + r.w / 2, r.y + r.h / 2 - 10.0f, "Can't show it", theme::bad, 11.0f,
+                          ALIGN_CENTER | ALIGN_MIDDLE);
+                const bool current = image.id == block->image;
+                fontSize(11.0f);
+                const std::string name = fitText(image.name, r.w - 12.0f);
+                label(r.x + r.w / 2, r.y + r.h - 11.0f, name.c_str(), current ? theme::accent : theme::textDim, 11.0f,
+                      ALIGN_CENTER | ALIGN_MIDDLE);
+                if (current)
+                {
+                    beginPath();
+                    roundedRect(r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f, 6.0f);
+                    strokeColor(theme::accent);
+                    strokeWidth(2.0f);
+                    stroke();
+                }
+                fHits.push_back({ clipped(r), Hit::ImageChoose, static_cast<int>(k) });
+                const bool armed = image.id == fImageDeleteArmed;
+                if (hover || armed)
+                {
+                    const Rect del { r.x + r.w - 70.0f, r.y + 6.0f, 64.0f, 24.0f };
+                    drawButton(del, armed ? "Delete?" : "Delete", armed, theme::bad, Hit::ImageDelete,
+                               static_cast<int>(k));
+                    fHits.back().rect = clipped(del);
+                }
+            }
+            ry += ((ownTiles + columns - 1) / columns) * (tileH + gap) + gap;
+            if (pedal)
+            {
+                // the built-in ones' heading (the cabs have theirs: Bass and Guitar)
+                if (visible(ry, groupH))
+                    label(listX + 4.0f, ry + groupH - 10.0f, amp ? "Built-in heads" : "Built-in pedals", theme::accent,
+                          12.0f, ALIGN_LEFT | ALIGN_MIDDLE);
+                ry += groupH;
+            }
+        }
         for (size_t i = 0; i < sizes.size(); ++i)
         {
             if (!pedal && (i == 0 || i == kBassCabSizes))
@@ -8158,7 +8383,7 @@ private:
                 fillColor(hover ? theme::accent : theme::textDim);
                 fill();
                 const std::string name = std::string(kCabSizes[i]) + "\"";
-                const bool holdsCurrent = cabImageSize(current) == kCabSizes[i];
+                const bool holdsCurrent = !own && cabImageSize(current) == kCabSizes[i];
                 label(heading.x + 34.0f, ay, name.c_str(), holdsCurrent ? theme::accent : theme::text, 14.0f,
                       ALIGN_LEFT | ALIGN_MIDDLE);
                 char count[32];
@@ -8174,7 +8399,6 @@ private:
             // its cabs: the IR's current one outlined, the default one labelled
             for (size_t k = 0; k < sizes[i].size(); ++k)
             {
-                const float tileH = amp ? tile * 0.62f : tile;
                 const Rect r { listX + (k % columns) * (tile + gap), ry + (k / columns) * (tileH + gap), tile, tileH };
                 if (!visible(r.y, r.h))
                     continue;
@@ -8183,7 +8407,7 @@ private:
                 surface(r.x, r.y, r.w, r.h, 6.0f, Surface::Item, hover);
                 if (NanoImage* img = amp ? ampImage(id, true) : pedal ? pedalImage(id, true) : cabImage(id, true))
                     drawImageFit(*img, r.x + 6.0f, r.y + 6.0f, r.w - 12.0f, r.h - 12.0f, 3.0f);
-                if (id == current)
+                if (id == current && !own)
                 {
                     beginPath();
                     roundedRect(r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f, 6.0f);
@@ -8211,10 +8435,11 @@ private:
         const bool picked = (amp ? fSettings.ampImages : pedal ? fSettings.pedalImages : fSettings.cabImages)
                                 .count(cabKey(fCabHash, fCabPath)) != 0;
         const Rect reset { x + w - 24.0f - 150.0f, y + h - 48.0f, 150.0f, 30.0f };
-        if (picked)
+        if (picked || own)
             drawButton(reset, "Reset to Default", false, theme::accent, Hit::CabChoose, -1);
         label(x + 20.0f, y + h - 40.0f,
-              amp ? (picked ? "You picked this model's amp head. It follows the file into every chain and preset."
+              own ? "This block shows one of your images, as it is: no knobs, power light or footswitch on it."
+              : amp ? (picked ? "You picked this model's amp head. It follows the file into every chain and preset."
                             : "This model shows its default head, picked from the file's content and name.")
               : pedal ? (picked ? "You picked this capture's pedal. It follows the file into every chain and preset."
                               : "This capture shows its default pedal, picked from the file's content.")
@@ -8862,6 +9087,7 @@ private:
     std::chrono::steady_clock::time_point fMomentaryPressedAt;
     bool fMomentaryReleasePending = false;
     static constexpr std::chrono::milliseconds kMomentaryMinHold { 80 };
+    float fDragStartX = 0.0f;
     float fDragStartY = 0.0f;
     float fDragStartValue = 0.0f;
     uint fLastClickTime = 0;
@@ -8968,6 +9194,7 @@ private:
     static constexpr std::chrono::milliseconds kHelpDelay { 600 };
     int fHelpKind = -1;
     uintptr_t fVsyncDrawable = 0;
+    uintptr_t fCursorDrawable = 0; // the window given its arrow cursor (defineArrowCursor())
 
     // frame-rate readout (XYTHOS_SHOW_FPS)
     const bool fShowFps = [] {
@@ -8997,7 +9224,7 @@ private:
     NanoImage fLogoMark, fLogoWordmark;
     bool fLogoTried = false;
     bool fDimControls = false; // drawing a bypassed block's controls (dimmed())
-    std::vector<int> fMigratedSlots; // the host's chain had blocks without their later controls (slots; kMigrations)
+    std::vector<MigratedSlot> fMigratedSlots; // the host's chain had blocks without their later controls (slots; kMigrations)
     std::chrono::steady_clock::time_point fOpenedAt = std::chrono::steady_clock::now();
     std::vector<std::string> fPresetFolders;  // Save Preset dialog
     std::vector<std::string> fMenuPresets;    // the preset menu's presets, by MenuEntry::arg

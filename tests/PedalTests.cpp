@@ -820,6 +820,7 @@ TEST_CASE("looper status survives the trip through a float")
 TEST_CASE("looper records, plays back, overdubs, stops and clears")
 {
     auto block = make(kLooperBlockDescriptor);
+    block->setParam(kLooperParamLatency, 0.0f); // no round trip to make up for (the latency tests below)
     // record 0.5 s of a tone
     press(*block, kLooperParamRecDub);
     auto take = sine(440.0, 0.3f, 24000);
@@ -905,6 +906,7 @@ std::unique_ptr<Block> countInLooper(int countIn, int measures, int loops)
     block->setParam(kLooperParamMeasures, static_cast<float>(measures));
     block->setParam(kLooperParamLoops, static_cast<float>(loops));
     block->setParam(kLooperParamClick, 100.0f);
+    block->setParam(kLooperParamLatency, 0.0f);
     return block;
 }
 
@@ -1035,6 +1037,67 @@ TEST_CASE("looper Tap sets the count-in tempo")
     testing::runBlock(*block, bar);
     CHECK(looperStatus(*block).state == LooperState::Playing);
     CHECK(looperStatus(*block).lengthTenths == 16);
+}
+
+TEST_CASE("looper latency: a count-in loop played a round trip late comes round on the clicks")
+{
+    // 10 ms (480 samples) round trip: the player hears each click and their note arrives 480 samples after it
+    CHECK(kLooperBlockDescriptor.params[kLooperParamLatency].def == 10.0f);
+    auto block = countInLooper(4, 1, 1);
+    block->setParam(kLooperParamClick, 0.0f);
+    block->setParam(kLooperParamLatency, 10.0f);
+    press(*block, kLooperParamRecDub);
+
+    // a note on each beat of the recorded bar (beats 4..7 from the press), and on the next downbeat (8), late by the
+    // round trip; a held tone under them, so the seam has something to cut
+    constexpr size_t beat = 24000, late = 480;
+    std::vector<std::vector<float>> in(1, std::vector<float>(beat * 8 + late, 0.0f));
+    for (size_t t = beat * 4; t < in[0].size(); ++t)
+        in[0][t] = 0.1f;
+    for (size_t k = 4; k < 8; ++k)
+        in[0][k * beat + late] = 0.6f;
+    int allocations = 0;
+    testing::runBlock(*block, in, 128, &allocations);
+    CHECK(looperStatus(*block).state == LooperState::Playing);
+    CHECK(looperStatus(*block).lengthTenths == 20);
+
+    // from here on silence in: the notes come back exactly on the grid (beats 9, 10, 11 and 12), at full strength
+    std::vector<std::vector<float>> out(1, std::vector<float>(beat * 4 + 3000, 0.0f));
+    testing::runBlock(*block, out, 128, &allocations);
+    CHECK(allocations == 0);
+    const size_t start = beat * 8 + late; // where `out` starts
+    for (size_t k = 9; k <= 12; ++k)
+    {
+        const size_t at = k * beat - start;
+        CHECK(out[0][at] == doctest::Approx(0.6f).epsilon(0.01));
+        CHECK(std::abs(out[0][at - 1]) < 0.2f);
+        CHECK(std::abs(out[0][at + 1]) < 0.2f);
+    }
+    // the held tone has no gap or click at the seam (beat 12, where the loop starts again)
+    float worst = 0.0f;
+    for (size_t t = 12 * beat - start - 2000; t < 12 * beat - start + 2000; ++t)
+        if (t != 12 * beat - start)
+            worst = std::max(worst, std::abs(out[0][t] - 0.1f));
+    CHECK(worst < 0.02f);
+}
+
+TEST_CASE("looper latency: overdubs land where the playback was a round trip earlier")
+{
+    auto block = make(kLooperBlockDescriptor); // Free mode
+    block->setParam(kLooperParamLatency, 10.0f); // 480 samples
+    press(*block, kLooperParamRecDub);
+    std::vector<std::vector<float>> silence(1, std::vector<float>(24000, 0.0f));
+    testing::runBlock(*block, silence);
+    press(*block, kLooperParamRecDub); // closed: playing from the start
+    press(*block, kLooperParamRecDub); // overdub
+    std::vector<std::vector<float>> dub(1, std::vector<float>(24000, 0.0f));
+    dub[0][5000] = 0.5f;
+    testing::runBlock(*block, dub);
+    press(*block, kLooperParamRecDub); // back to playing, at the loop's start again
+    std::vector<std::vector<float>> out(1, std::vector<float>(24000, 0.0f));
+    testing::runBlock(*block, out);
+    CHECK(out[0][4520] == doctest::Approx(0.5f));
+    CHECK(std::abs(out[0][5000]) < 1e-6f);
 }
 
 TEST_CASE("TapTempo averages the taps and starts over after a pause")

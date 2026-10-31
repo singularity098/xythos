@@ -28,12 +28,20 @@ namespace xythos {
 // hear while playing). Tap (owner, 2026-10-31): tapping it sets the tempo for the next count-in, from the average of
 // the last taps; the UI times the same taps and sets the BPM control to match.
 //
+// Latency (owner, 2026-10-31: the loops didn't come round at the right moment): what you play reaches the plugin a
+// round trip after the sound it answers (the click, or the loop) left it: the audio interface's output and input
+// latency, which no plugin API reports. So in Count In mode the recording starts that much after the downbeat's click
+// and the loop plays on from that far in when it closes, keeping it on the clicks' grid with nothing cut off at the
+// seam; and every overdub (both modes) is written that far behind the playback, where what was heard sits. 0 ms is
+// the looper as it was.
+//
 // Config: "countIn" (bool) marks a block made since Count In existed. Blocks saved before it lack it: their new
 // controls hold the host's unused values, so the DSP keeps them in Free mode, and the UI sets the controls to their
 // defaults and adds the key (migrateBlocks()).
 extern const BlockDescriptor kLooperBlockDescriptor;
 
 constexpr const char* kLooperCountInKey = "countIn";
+constexpr const char* kLooperLatencyKey = "latency"; // marks a block made since Latency existed (UI migration only)
 
 enum LooperParam {
     kLooperParamRecDub,   // momentary
@@ -51,6 +59,7 @@ enum LooperParam {
     kLooperParamLoops,    // choice: passes recorded (the first, then overdubs), 1..8
     kLooperParamClick,    // %: the clicks' level (100% = the metronome's default volume; up to 200%)
     kLooperParamTap,      // momentary: tap tempo for BPM
+    kLooperParamLatency,  // ms: the round trip compensated for (config "latency"; added 2026-10-31)
     kLooperParamCount
 };
 

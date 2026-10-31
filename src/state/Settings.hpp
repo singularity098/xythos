@@ -39,6 +39,9 @@ struct Settings {
     std::map<std::string, std::string> cabImages; // IR content hash -> the built-in cab image the user picked for it
     std::map<std::string, std::string> pedalImages; // NAM pedal content hash -> the generic pedal image picked for it
     std::map<std::string, std::string> ampImages;   // NAM amp content hash -> the amp head image picked for it
+    // The user's own defaults for new blocks (the block panel's Set as Default; owner, 2026-10-31): block typeId ->
+    // control name -> value, in the control's units. Controls not listed keep the type's default.
+    std::map<std::string, std::map<std::string, float>> blockDefaults;
 
     static constexpr size_t kMaxRecentPresets = 8;
     void addRecentPreset(const std::string& path);

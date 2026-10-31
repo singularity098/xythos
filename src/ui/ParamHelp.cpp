@@ -944,6 +944,13 @@ constexpr BlockHelp kBlockHelp[] = {
     { "looper", "Tap",
       "Tap it in time, three or four times, to set the BPM for the next count-in to the tempo you tap. Map a "
       "footswitch to it with MIDI learn to set the tempo with your foot." },
+    { "looper", "Latency",
+      "Your audio interface's round trip: how late what you play reaches the plugin after the sound you played to "
+      "left it. The looper makes up for it, so a Count In loop starts on the beat you played and comes round on the "
+      "click, and overdubs land where you heard the loop. If loops or overdubs come in late, raise it; early, lower "
+      "it. Your DAW may show the figure: Reaper shows the input and output latency (add them) top right in its main "
+      "window. Set as Default "
+      "keeps it for new loopers." },
 
     // Octave
     { "octave", "Sub 1",
