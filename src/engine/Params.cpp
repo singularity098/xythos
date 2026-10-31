@@ -104,6 +104,8 @@ constexpr GlobalParamSpec kToolParams[kParamSlotLatchBase - kParamMergeBalance] 
 const GlobalParamSpec kNewestParams[] = {
     // the tuner's Runes view (owner, 2026-10-31: the default; Needle and Strobe stay, on Tuner Strobe)
     { "Tuner Runes",         "tuner_runes",    "",    0.0f,   1.0f,   1.0f,   kParamFlagToggle | kParamFlagHidden },
+    // the Chevrons strobe (owner, 2026-10-31): with Tuner Strobe on, Chevrons instead of Hive
+    { "Tuner Chevrons",      "tuner_chevrons", "",    0.0f,   1.0f,   0.0f,   kParamFlagToggle | kParamFlagHidden },
 };
 static_assert(sizeof(kNewestParams) / sizeof(kNewestParams[0]) == kParamCount - kParamSlotLatchEnd);
 

@@ -2387,11 +2387,15 @@ constexpr GlobalHelp kGlobalHelp[] = {
       "The pitch of A4 that the tuner tunes to. 440 Hz is standard; change it only to play along with something "
       "tuned differently." },
     { "tuner_strobe",
-      "Switches to the needle or the strobe view. The needle is a row of ticks that swell into a ridge where your "
-      "pitch is: left of the centre when you're flat, right when you're sharp; tune until it sits between the green "
-      "markers. The strobe is a honeycomb with bands of light sweeping across it, toward the upper left when you're "
-      "flat and the lower right when you're sharp, faster the further out you are; they stand still when you're "
-      "in tune, which makes it the most precise view." },
+      "Vernier: two rings of ticks around the note. The outer ring spans 50 cents either way, to find the note; the "
+      "inner one only 5, so the last cent is easy to see, and its dot lights up once you're that close. Tune until "
+      "both dots sit at the top, in green. Hive: a strobe, a honeycomb with bands of light sweeping across it, "
+      "toward the upper left when you're flat and the lower right when you're sharp, faster the further out you "
+      "are; they stand still when you're in tune, which makes it the most precise view." },
+    { "tuner_chevrons",
+      "Chevrons: a strobe of three rows of arrows that point and march the way to tune, right when you're flat and "
+      "left when you're sharp, faster the further out you are. As you get close they flatten, and in tune they "
+      "stand still as upright green bars. The lower rows are the octaves above the note." },
     { "tuner_runes",
       "The runes view: a row of 21 glyphs, 5 cents each. Glyphs light up from the centre toward the side you're "
       "off, left when you're flat and right when you're sharp; tune until only the centre one is lit, in green." },
