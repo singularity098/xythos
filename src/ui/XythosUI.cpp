@@ -6326,54 +6326,67 @@ private:
         if (runes)
             drawRunes({ panel.x + 16.0f, viewTop, panel.w - 32.0f, viewHeight }, active, inTune, stateColor);
         else if (strobe)
-            drawStrobe({ cx - 300.0f, viewTop, 600.0f, std::min(viewHeight, 120.0f) }, active, inTune);
+        {
+            const float w = std::min(panel.w - 32.0f, 640.0f);
+            drawStrobe({ cx - w / 2, viewTop, w, std::min(viewHeight, 160.0f) }, active, inTune);
+        }
         else
-            drawNeedle(cx, viewTop, viewHeight, active, inTune, stateColor);
+            drawNeedle({ panel.x + 16.0f, viewTop, panel.w - 32.0f, viewHeight }, active, inTune);
     }
 
-    // Needle gauge, styled like the knobs: a scale of hairline ticks over ±50 cents (a 120° arc), lit from the centre
-    // out to the pitch, and a dot riding the arc for the needle. The ticks around 0 are the in-tune zone.
-    void drawNeedle(float cx, float top, float height, bool active, bool inTune, const Color& color)
+    // Needle: Spine (owner, 2026-10-31; needle concept 6 of the second round of tuner mockups). A row of hairline ticks,
+    // one every 2 cents over ±50, that swell into a ridge where the pitch is; the ridge walks to the centre, between
+    // two green markers, as you tune. Lit in the highlight, green in tune.
+    void drawNeedle(const Rect& r, bool active, bool inTune)
     {
-        // the arc only reaches half the radius down from its top, so the radius can be about twice the height
-        const float radius = std::clamp(2.0f * (height - 30.0f), 60.0f, 300.0f);
-        const float cy = top + radius + 4.0f;
-        constexpr float span = static_cast<float>(M_PI) / 3.0f; // each side
-        const float up = -static_cast<float>(M_PI) / 2.0f;
-        auto angleOf = [&](float c) { return up + std::clamp(c, -50.0f, 50.0f) / 50.0f * span; };
-        const Color unlit(1.0f, 1.0f, 1.0f, 0.18f);
-        const float needle = std::clamp(fNeedleCents, -50.0f, 50.0f);
+        constexpr float kLabels = 22.0f;  // the −50 / +50 labels under the row
+        constexpr float kAbove = 69.0f, kBelow = 39.0f; // the tallest tick and the markers, at full size
+        const float scale = std::clamp((r.h - kLabels - 8.0f) / (kAbove + kBelow), 0.4f, 1.0f);
+        const float half = std::min(r.w, 720.0f) / 2 - 20.0f;
+        const float cx = r.x + r.w / 2;
+        const float y = r.y + 4.0f + kAbove * scale;
+        const float pitch = std::clamp(fNeedleCents, -50.0f, 50.0f);
+        auto xOf = [&](float c) { return cx + c / 50.0f * half; };
 
         for (int c = -50; c <= 50; c += 2)
         {
-            const float a = angleOf(static_cast<float>(c));
-            const float length = c == 0 ? 18.0f : c % 10 == 0 ? 12.0f : 7.0f;
-            const bool zone = std::fabs(static_cast<float>(c)) <= kTunerInTuneCents;
-            const bool lit = active && (c == 0 || (c < 0 ? needle <= c + 1.0f : needle >= c - 1.0f));
+            const float d = static_cast<float>(c) - pitch;
+            const float bump = active ? std::exp(-d * d / (2.0f * 5.5f * 5.5f)) : 0.0f;
+            const float h = (7.0f + (c % 10 == 0 ? 4.0f : 0.0f) + 46.0f * bump) * scale;
+            const float x = xOf(static_cast<float>(c));
             beginPath();
-            moveTo(cx + std::cos(a) * radius, cy + std::sin(a) * radius);
-            lineTo(cx + std::cos(a) * (radius - length), cy + std::sin(a) * (radius - length));
-            strokeColor(lit ? (zone && inTune ? theme::good : color) : zone ? theme::good.withAlpha(0.45f) : unlit);
-            strokeWidth(c % 10 == 0 ? 1.6f : 1.2f);
+            moveTo(x, y - h);
+            lineTo(x, y + h * 0.45f);
+            if (bump > 0.08f)
+                strokeColor((inTune ? theme::good : theme::accent).withAlpha(0.35f + 0.65f * bump));
+            else
+                strokeColor(std::abs(c) <= 2 ? theme::good.withAlpha(0.45f) : Color(1.0f, 1.0f, 1.0f, 0.16f));
+            strokeWidth(c % 10 == 0 ? 1.5f : 1.1f);
             stroke();
-            if (c == -50 || c == 50)
-                label(cx + std::cos(a) * (radius + 16.0f), cy + std::sin(a) * (radius + 16.0f), c > 0 ? "+50" : "−50",
-                      theme::textDim, 11.0f, ALIGN_CENTER | ALIGN_MIDDLE);
         }
 
-        // the track the dot rides on, a hairline like a knob's edge
-        const float track = radius - 24.0f;
+        // the spine itself, and the in-tune markers above and below the centre
         beginPath();
-        arc(cx, cy, track, angleOf(-50), angleOf(50), CW);
-        strokeColor(unlit);
+        moveTo(xOf(-50.0f) - 10.0f, y);
+        lineTo(xOf(50.0f) + 10.0f, y);
+        strokeColor(theme::border);
         strokeWidth(1.0f);
         stroke();
-
-        const float a = angleOf(active ? needle : 0.0f);
         beginPath();
-        circle(cx + std::cos(a) * track, cy + std::sin(a) * track, 5.0f);
-        fillColor(!active ? unlit : inTune ? theme::good : color);
+        for (const float my : { y - 64.0f * scale, y + 34.0f * scale })
+        {
+            moveTo(cx, my - 5.0f);
+            lineTo(cx + 4.0f, my);
+            lineTo(cx, my + 5.0f);
+            lineTo(cx - 4.0f, my);
+            closePath();
+        }
+        fillColor(inTune ? theme::good : theme::good.withAlpha(0.5f));
         fill();
+
+        const float ly = y + kBelow * scale + kLabels / 2;
+        label(xOf(-50.0f), ly, "−50", theme::textDim, 11.0f, ALIGN_CENTER | ALIGN_MIDDLE);
+        label(xOf(50.0f), ly, "+50", theme::textDim, 11.0f, ALIGN_CENTER | ALIGN_MIDDLE);
     }
 
     // Runes (owner, 2026-10-31; concept 8 of the tuner mockups): a row of 21 crystal glyphs, 5 cents each over ±50,
@@ -6461,38 +6474,62 @@ private:
             label(x0 + i * pitch, ly, text, theme::textDim, 11.0f, ALIGN_CENTER | ALIGN_MIDDLE);
     }
 
-    // Strobe: three rows of bands (the fundamental and two octaves, like a Peterson strobe). They drift at a
-    // speed proportional to how far out of tune the note is, and stand still when it's in tune.
+    // Strobe: Hive (owner, 2026-10-31; strobe concept 6 of the second round of tuner mockups). A honeycomb window with
+    // diagonal bands of light sweeping across its cells, at a speed proportional to how far out of tune the note is;
+    // still in tune. The cells are drawn in a few brightness steps, one path each.
     void drawStrobe(const Rect& r, bool active, bool inTune)
     {
         // a translucent black window with a hairline edge
-        fillRect(r.x, r.y, r.w, r.h, theme::panelFill, 8.0f);
+        fillRect(r.x, r.y, r.w, r.h, theme::panelFill, 10.0f);
         beginPath();
-        roundedRect(r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f, 8.0f);
+        roundedRect(r.x + 0.5f, r.y + 0.5f, r.w - 1.0f, r.h - 1.0f, 10.0f);
         strokeColor(Color(1.0f, 1.0f, 1.0f, 0.18f));
         strokeWidth(1.0f);
         stroke();
         scissor(r.x + 1.0f, r.y + 1.0f, r.w - 2.0f, r.h - 2.0f);
-        const float rowHeight = r.h / 3.0f;
+
         const Color color = !active ? Color(1.0f, 1.0f, 1.0f, 0.18f) : inTune ? theme::good : theme::accent;
-        for (int row = 0; row < 3; ++row)
-        {
-            // each band is a pair of tick lines, like the knobs' scale
-            const float period = 56.0f / static_cast<float>(1 << row) + 12.0f;
-            const float offset = std::fmod(std::fmod(fStrobePhase[row], period) + period, period);
-            const float y0 = r.y + row * rowHeight + 8.0f, y1 = r.y + (row + 1) * rowHeight - 8.0f;
-            globalAlpha(1.0f - row * 0.2f);
-            beginPath();
-            for (float x = r.x + offset - period; x < r.x + r.w + period; x += period)
+        constexpr float kSide = 13.0f; // a cell's corner radius
+        constexpr int kSteps = 8;      // brightness steps
+        const float across = kSide * std::sqrt(3.0f);
+        const float shift = fStrobePhase[0] * 0.6f;
+        auto band = [&](float x, float y) { // 0..1, the diagonal bands
+            const float b = 0.5f + 0.5f * std::cos((x * 0.8f + y * 0.6f - shift) / 120.0f * 2.0f * static_cast<float>(M_PI));
+            return b * b * b * b;
+        };
+        auto hexagon = [&](float x, float y) {
+            for (int k = 0; k < 6; ++k)
             {
-                for (const float dx : { 0.0f, period / 4 })
-                {
-                    moveTo(x + dx, y0);
-                    lineTo(x + dx, y1);
-                }
+                const float a = static_cast<float>(k) * static_cast<float>(M_PI) / 3.0f + static_cast<float>(M_PI) / 6.0f;
+                const float px = x + std::cos(a) * (kSide - 2.0f), py = y + std::sin(a) * (kSide - 2.0f);
+                k == 0 ? moveTo(px, py) : lineTo(px, py);
             }
+            closePath();
+        };
+        const int rows = static_cast<int>(r.h / (kSide * 1.5f)) + 2;
+        const int cols = static_cast<int>(r.w / across) + 2;
+        for (int step = 0; step < kSteps; ++step)
+        {
+            const float lo = static_cast<float>(step) / kSteps, hi = static_cast<float>(step + 1) / kSteps;
+            const float b = (lo + hi) / 2;
+            beginPath();
+            for (int row = 0; row < rows; ++row)
+                for (int col = -1; col < cols; ++col)
+                {
+                    const float x = col * across + (row % 2) * across / 2, y = row * kSide * 1.5f;
+                    const float v = band(x, y);
+                    if (v >= lo && (v < hi || step == kSteps - 1))
+                        hexagon(r.x + x, r.y + y);
+                }
+            if (b > 0.5f)
+            {
+                globalAlpha((b - 0.5f) * 0.35f);
+                fillColor(color);
+                fill();
+            }
+            globalAlpha(0.12f + 0.88f * b);
             strokeColor(color);
-            strokeWidth(1.5f);
+            strokeWidth(1.0f);
             stroke();
         }
         globalAlpha(1.0f);

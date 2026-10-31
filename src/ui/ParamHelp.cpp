@@ -2387,9 +2387,11 @@ constexpr GlobalHelp kGlobalHelp[] = {
       "The pitch of A4 that the tuner tunes to. 440 Hz is standard; change it only to play along with something "
       "tuned differently." },
     { "tuner_strobe",
-      "Switches to the needle or the strobe view. The needle swings left when you're flat and right when you're "
-      "sharp. The strobe bands drift left when you're flat and right when you're sharp, and stand still when you're "
-      "in tune; it's the most precise view." },
+      "Switches to the needle or the strobe view. The needle is a row of ticks that swell into a ridge where your "
+      "pitch is: left of the centre when you're flat, right when you're sharp; tune until it sits between the green "
+      "markers. The strobe is a honeycomb with bands of light sweeping across it, toward the upper left when you're "
+      "flat and the lower right when you're sharp, faster the further out you are; they stand still when you're "
+      "in tune, which makes it the most precise view." },
     { "tuner_runes",
       "The runes view: a row of 21 glyphs, 5 cents each. Glyphs light up from the centre toward the side you're "
       "off, left when you're flat and right when you're sharp; tune until only the centre one is lit, in green." },
