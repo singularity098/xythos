@@ -1081,6 +1081,43 @@ TEST_CASE("looper latency: a count-in loop played a round trip late comes round 
     CHECK(worst < 0.02f);
 }
 
+TEST_CASE("looper latency: the first repeat comes round on the downbeat, attack and all")
+{
+    // owner, 2026-10-31: a pause before the first repeat. The loop waited for the round trip after the bar line and
+    // then played on from that far in, so the first repeat's downbeat lost its attack.
+    auto block = countInLooper(4, 1, 1);
+    block->setParam(kLooperParamClick, 0.0f);
+    block->setParam(kLooperParamLatency, 10.0f); // 480 samples
+    press(*block, kLooperParamRecDub);
+    constexpr size_t beat = 24000, late = 480;
+    // a sharp note on the recorded bar's downbeat (beat 4 from the press), a round trip late; a held tone to the end
+    // of the bar, its last round trip arriving after the next downbeat
+    std::vector<std::vector<float>> in(1, std::vector<float>(beat * 8 + late, 0.0f));
+    for (size_t t = beat * 4; t < in[0].size(); ++t)
+        in[0][t] = 0.1f;
+    in[0][beat * 4 + late] = 0.6f;
+    // up to the next downbeat (beat 8)
+    std::vector<std::vector<float>> before(1, std::vector<float>(in[0].begin(), in[0].begin() + beat * 8));
+    testing::runBlock(*block, before, 128);
+    CHECK(looperStatus(*block).state == LooperState::Recording);
+    std::vector<std::vector<float>> after(1, std::vector<float>(in[0].begin() + beat * 8, in[0].end()));
+    after[0].resize(beat * 4 + 1000, 0.0f);
+    int allocations = 0;
+    testing::runBlock(*block, after, 128, &allocations);
+    CHECK(allocations == 0);
+    CHECK(looperStatus(*block).state == LooperState::Playing);
+    // the loop came round exactly on beat 8 with the downbeat (0.6) and played the held tone after it
+    CHECK(after[0][0] == doctest::Approx(0.6f + 0.1f).epsilon(0.01)); // and the live tone's last moment
+    CHECK(after[0][100] == doctest::Approx(0.1f + 0.1f).epsilon(0.01)); // the loop's tone plus the live one
+    // the bar's last round trip, which arrived after the loop came round, is in the loop's end: the tone runs on into
+    // the seam at beat 12 with no gap, and the downbeat comes round again on it
+    float worst = 0.0f;
+    for (size_t t = beat * 4 - 2000; t < beat * 4; ++t)
+        worst = std::max(worst, std::abs(after[0][t] - 0.1f));
+    CHECK(worst < 0.02f);
+    CHECK(after[0][beat * 4] == doctest::Approx(0.6f).epsilon(0.01));
+}
+
 TEST_CASE("looper latency: overdubs land where the playback was a round trip earlier")
 {
     auto block = make(kLooperBlockDescriptor); // Free mode

@@ -7003,6 +7003,18 @@ private:
                 controls.push_back({ Cell::Param, p });
             controls.push_back({ Cell::A2Size, 0 });
         }
+        else if (type == &kLooperBlockDescriptor)
+        {
+            // Tap sits next to BPM, which it sets (owner, 2026-10-31); the slots keep their order
+            for (int p = 0; p < type->numParams; ++p)
+            {
+                if (p == kLooperParamTap)
+                    continue;
+                controls.push_back({ Cell::Param, p });
+                if (p == kLooperParamBpm)
+                    controls.push_back({ Cell::Param, kLooperParamTap });
+            }
+        }
         else
         {
             for (int p = 0; p < type->numParams; ++p)

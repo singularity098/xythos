@@ -158,8 +158,21 @@ private:
         {
             // a round trip after the downbeat's click: when what was played to it arrives
             fLength = 0;
-            fCloseOffset = fRecLatency;
             fState = LooperState::Recording;
+        }
+        if (fState == LooperState::Recording && fClock >= fRecStart + fRecLength)
+        {
+            // the grid's next downbeat: the loop comes round now, from its first sample (its downbeat, attack and
+            // all), while the bar's last round trip, still on its way in, goes on into the loop's end
+            fTailPos = fLength;
+            fLength = fRecLength;
+            fPosition = 0.0;
+            fState = fPasses > 1 ? LooperState::Overdubbing : LooperState::Playing;
+            if (fPasses <= 1)
+                fTimed = false;
+            fFade.snap(1.0f);
+            if (fTailPos >= fLength)
+                finishTail();
         }
         if (fState == LooperState::Overdubbing && fClock >= fEnd)
         {
@@ -201,18 +214,25 @@ private:
             return;
         if (fState == LooperState::Recording)
         {
-            for (uint32_t ch = 0; ch < 2; ++ch)
-                fBuffer[ch][fLength] = io[numChannels > 1 ? ch : 0][i];
-            if (++fLength >= (fTimed ? fRecLength : kLooperMaxSamples))
+            // Count In mode's recording ends on the grid (tick()); Free mode's when pressed, or when the buffer is full
+            if (fLength < kLooperMaxSamples && !(fTimed && fLength >= fRecLength))
             {
-                closeLoop();
-                // Count In mode: the passes after the first are overdubs, still with the clicks
-                if (fTimed && fState == LooperState::Playing && fPasses > 1)
-                    fState = LooperState::Overdubbing;
-                else
-                    fTimed = false;
+                for (uint32_t ch = 0; ch < 2; ++ch)
+                    fBuffer[ch][fLength] = io[numChannels > 1 ? ch : 0][i];
+                ++fLength;
             }
+            if (!fTimed && fLength >= kLooperMaxSamples)
+                closeLoop();
             return;
+        }
+        // Count In mode, just after the loop came round: the last bar's last round trip arrives, into the loop's end
+        const bool tailing = fTailPos < fLength;
+        if (tailing)
+        {
+            for (uint32_t ch = 0; ch < 2; ++ch)
+                fBuffer[ch][fTailPos] = io[numChannels > 1 ? ch : 0][i];
+            if (++fTailPos >= fLength)
+                finishTail();
         }
         if (fLength == 0 || (fState == LooperState::Stopped && fade <= 0.0f))
             return;
@@ -235,11 +255,11 @@ private:
         {
             std::vector<float>& buffer = fBuffer[ch];
             const float played = static_cast<float>(buffer[index] + (buffer[next] - buffer[index]) * frac);
-            if (fState == LooperState::Overdubbing)
+            if (fState == LooperState::Overdubbing && !tailing) // the tail just wrote this input
                 buffer[write] = buffer[write] * feedback + io[ch][i];
             io[ch][i] += played * level * fade;
         }
-        if (fState == LooperState::Overdubbing && numChannels == 1)
+        if (fState == LooperState::Overdubbing && !tailing && numChannels == 1)
             fBuffer[1][write] = fBuffer[0][write];
 
         if (fState != LooperState::Stopped)
@@ -275,6 +295,7 @@ private:
 
     void recDub()
     {
+        endTail();
         switch (fState)
         {
         case LooperState::Empty:
@@ -284,7 +305,6 @@ private:
                 break;
             }
             fLength = 0;
-            fCloseOffset = 0;
             fState = LooperState::Recording;
             break;
         case LooperState::CountIn:
@@ -310,6 +330,7 @@ private:
 
     void playStop()
     {
+        endTail();
         switch (fState)
         {
         case LooperState::CountIn:
@@ -341,8 +362,16 @@ private:
             clear();
             return;
         }
-        // the seam: the loop's last moments crossfade into what was played just before its start, so the end runs on
-        // into the start without a click, and the start (a downbeat's attack, often) stays as it was played
+        crossfadeSeam();
+        fPosition = 0.0;
+        fState = LooperState::Playing;
+        fFade.snap(1.0f);
+    }
+
+    // The seam: the loop's last moments crossfade into what was played just before its start, so the end runs on
+    // into the start without a click, and the start (a downbeat's attack, often) stays as it was played
+    void crossfadeSeam()
+    {
         for (uint32_t ch = 0; ch < 2; ++ch)
         {
             std::vector<float>& buffer = fBuffer[ch];
@@ -353,15 +382,29 @@ private:
                 sample += (fPreroll[ch][k] - sample) * g;
             }
         }
-        // Count In mode: the playback carries on from a round trip in, where the clicks' grid is now
-        fPosition = static_cast<double>(std::min(fCloseOffset, fLength - 1));
-        fState = LooperState::Playing;
-        fFade.snap(1.0f);
+    }
+
+    // Count In mode: the loop's end is all in
+    void finishTail()
+    {
+        fTailPos = kNoTail;
+        crossfadeSeam();
+    }
+
+    // A press during the tail: what hasn't arrived yet is left silent
+    void endTail()
+    {
+        if (fTailPos >= fLength)
+            return;
+        for (uint32_t ch = 0; ch < 2; ++ch)
+            std::fill(fBuffer[ch].begin() + fTailPos, fBuffer[ch].begin() + fLength, 0.0f);
+        finishTail();
     }
 
     void clear()
     {
         fTimed = false;
+        fTailPos = kNoTail;
         fState = LooperState::Empty;
         fLength = 0;
         fPosition = 0.0;
@@ -395,7 +438,10 @@ private:
     // Latency: the round trip, in ms and in samples
     double fLatencyMs = 0.0;
     uint32_t fLatency = 0;
-    uint32_t fCloseOffset = 0; // where the playback starts when the recording closes (Count In: its round trip)
+    // Count In mode: the next sample of the loop's end to write once it's playing (the last round trip of its last
+    // bar, still arriving); kNoTail when there's none
+    static constexpr uint32_t kNoTail = 0xffffffffu;
+    uint32_t fTailPos = kNoTail;
 
     uint32_t latencySamples(double ms) const { return static_cast<uint32_t>(std::lround(ms * fSampleRate / 1000.0)); }
     float* fClickOut = nullptr; // the engine's click bus (setClickOutput()), or none

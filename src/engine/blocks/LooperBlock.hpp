@@ -30,10 +30,12 @@ namespace xythos {
 //
 // Latency (owner, 2026-10-31: the loops didn't come round at the right moment): what you play reaches the plugin a
 // round trip after the sound it answers (the click, or the loop) left it: the audio interface's output and input
-// latency, which no plugin API reports. So in Count In mode the recording starts that much after the downbeat's click
-// and the loop plays on from that far in when it closes, keeping it on the clicks' grid with nothing cut off at the
-// seam; and every overdub (both modes) is written that far behind the playback, where what was heard sits. 0 ms is
-// the looper as it was.
+// latency, which no plugin API reports. So in Count In mode the recording starts that much after the downbeat's click;
+// the loop comes round on the grid's next downbeat from its first sample (owner, 2026-10-31: it used to wait the round
+// trip and play on from that far in, which cut the first repeat's downbeat), while the bar's last round trip, still
+// arriving, goes on into the loop's end; and every overdub (both modes) is written that far behind the playback, where
+// what was heard sits. A Latency above the real round trip clips the downbeat's attack, one below it only plays the
+// loop that much late, so too low is the safer error. 0 ms is the looper as it was.
 //
 // Config: "countIn" (bool) marks a block made since Count In existed. Blocks saved before it lack it: their new
 // controls hold the host's unused values, so the DSP keeps them in Free mode, and the UI sets the controls to their
